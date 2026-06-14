@@ -411,6 +411,7 @@ export default function Home() {
                       <div className="flex justify-between items-center mb-4">
                         <div className="flex items-center gap-2">
                           {institutionLogo && (
+                            // eslint-disable-next-line @next/next/no-img-element
                             <img
                               src={institutionLogo}
                               alt={institution}

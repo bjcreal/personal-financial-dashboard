@@ -2,15 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { notFound } from "next/navigation";
 import { AccountDetails } from "@/components/AccountDetails";
 import Link from "next/link";
 import { apiGet } from "@/lib/api";
+import { Account } from "@/types/account";
 
 export default function AccountPage() {
   const params = useParams();
   const accountId = params?.accountId as string;
-  const [account, setAccount] = useState<any>(null);
+  const [account, setAccount] = useState<Account | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
