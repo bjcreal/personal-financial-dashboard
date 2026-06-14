@@ -1,0 +1,101 @@
+name: Deploy Application (CDK)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "cdk/**"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Deployment stage"
+        required: true
+        default: "prod"
+        type: choice
+        options: [dev, staging, prod]
+
+env:
+  AWS_REGION: us-east-1
+  STAGE: ${{ github.event.inputs.stage || 'prod' }}
+
+jobs:
+  test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Configure Poetry
+        run: poetry config virtualenvs.in-project true
+
+      - name: Cache virtualenv
+        uses: actions/cache@v4
+        with:
+          path: backend/.venv
+          key: venv-${{ runner.os }}-3.13-${{ hashFiles('backend/poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run tests
+        run: poetry run pytest tests/ -v
+
+  deploy:
+    name: CDK Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: cdk
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Install CDK dependencies
+        run: npm ci
+
+      - name: Install AWS CDK CLI
+        run: npm install -g aws-cdk
+
+      - name: CDK Bootstrap (idempotent)
+        run: cdk bootstrap --context stage=${{ env.STAGE }}
+
+      - name: CDK Deploy
+        run: cdk deploy --require-approval never --context stage=${{ env.STAGE }}
+
+      - name: Print API URL
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name superior-${{ env.STAGE }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text

@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "superior-backend"
+version = "0.1.0"
+description = "Superior — serverless FastAPI backend"
+authors = []
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+fastapi = "^0.135"
+mangum = "^0.21"
+boto3 = "^1.42"
+plaid-python = "^38.4"
+httpx = "^0.28"
+pydantic = "^2.12"
+pydantic-settings = "^2.13"
+python-jose = {version = "^3.5", extras = ["cryptography"]}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0"
+pytest-asyncio = "^1.3"
+moto = {version = "^5.1", extras = ["dynamodb", "secretsmanager"]}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

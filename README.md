@@ -1,212 +1,325 @@
-# Personal Finance Dashboard
+# Superior
 
-A dashboard to track all your financial accounts in one place using Plaid API and Coinbase integration. Features include bank account balance tracking, cryptocurrency holdings, daily updates, and email notifications.
-![image](https://github.com/user-attachments/assets/d0d8ba2c-d540-444e-a739-7f5797c4dd20)
+A self-hosted financial dashboard that aggregates bank accounts, investments, credit cards, loans, and crypto into a single view. Built entirely on serverless AWS infrastructure — no servers to manage, no standing costs when idle.
 
+![AWS Serverless](https://img.shields.io/badge/AWS-Serverless-orange) ![Python](https://img.shields.io/badge/Python-3.13-blue) ![Next.js](https://img.shields.io/badge/Next.js-15-black) ![Tests](https://img.shields.io/badge/tests-40%20passing-brightgreen)
 
+## Features
+
+- **Bank & investment account linking** via [Plaid](https://plaid.com) (Chase, Fidelity, Vanguard, and 12,000+ institutions)
+- **Crypto portfolio tracking** via Coinbase OAuth — live USD values for all wallet balances
+- **Net worth over time** — daily balance snapshots with historical charts
+- **Manual accounts** — track real estate, vehicles, or any asset without a Plaid connection
+- **Daily automated sync** — EventBridge cron refreshes all balances at 6 AM UTC
+- **Multi-user ready** — Cognito authentication with all data strictly scoped per user
+- **Transaction history** — sync and browse transactions for any linked account
+
+## Architecture
+
+```
+Browser (Next.js on Amplify Hosting)
+    │
+    ├─ Auth: AWS Cognito (sign-up, sign-in, JWT tokens)
+    │
+    └─ API: API Gateway → Lambda (FastAPI + Mangum)
+                │
+                ├─ DynamoDB (5 tables, on-demand billing, PITR enabled)
+                ├─ Secrets Manager (Plaid + Coinbase API keys)
+                ├─ Plaid API (bank data)
+                └─ Coinbase API (crypto data)
+
+EventBridge (cron 6 AM UTC)
+    └─ Sync Lambda → Plaid + Coinbase → DynamoDB
+```
+
+Infrastructure is split between Terraform (stateful resources) and AWS CDK (application layer). See the [Deployment](#deployment) section for the full flow.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 15, React 19, TypeScript, Tailwind CSS, AWS Amplify |
+| Backend | Python 3.13, FastAPI, Mangum, Pydantic |
+| Database | DynamoDB (5 tables, PAY_PER_REQUEST, PITR enabled) |
+| Auth | AWS Cognito User Pool |
+| Infra (stateful) | Terraform — DynamoDB, Cognito, SSM Parameter Store |
+| Infra (app layer) | AWS CDK v2 (TypeScript) — Lambda, API Gateway, EventBridge |
+| CI/CD | GitHub Actions (tests + Terraform + CDK deploys) |
+| Secrets | AWS Secrets Manager |
+| Dependency mgmt | Poetry (backend), npm (frontend/CDK) |
+
+---
 
 ## Prerequisites
 
-- Node.js (v18 or higher)
-- npm or yarn
-- A Plaid account (Development or Production)
-- (Optional) Amazon SES account for email notifications
+- [AWS CLI](https://aws.amazon.com/cli/) configured (`aws configure`)
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.6
+- [Node.js 22+](https://nodejs.org/) and npm (for CDK)
+- [Docker](https://www.docker.com/) (used by CDK to bundle the Python Lambda)
+- [Python 3.13](https://www.python.org/) and [Poetry](https://python-poetry.org/docs/#installation)
+- A [Plaid](https://dashboard.plaid.com/signup) developer account (free sandbox tier available)
+- A [Coinbase](https://www.coinbase.com/settings/api) OAuth app (optional — only needed for crypto)
+- An [AWS Amplify](https://console.aws.amazon.com/amplify/) app connected to your fork (for the frontend)
 
-## Setup Instructions
+---
 
-### 1. Plaid Setup
+## Deployment
 
-1. Create a [Plaid account](https://dashboard.plaid.com/signup)
-2. Once logged in, go to the [Keys section](https://dashboard.plaid.com/team/keys)
-3. Copy your `client_id` and the appropriate `secret` (sandbox/development/production)
-4. Note: For real bank connections, you'll need Development or Production credentials
+Infrastructure is split between two tools with a clear contract:
 
-### 2. Coinbase Setup
+- **Terraform** provisions stateful resources (DynamoDB, Cognito) with `prevent_destroy` guards and writes their IDs/ARNs to SSM Parameter Store.
+- **CDK** reads from SSM and deploys the application layer (Lambda, API Gateway, EventBridge). It can be torn down and redeployed without touching user data.
 
-1. Go to [Coinbase Developer Portal](https://www.coinbase.com/settings/api)
-2. Click "New OAuth2 Application"
-3. Fill in the application details:
-   - Name: Personal Finance Dashboard (or your preferred name)
-   - Website URL: http://localhost:3000
-   - Redirect URLs: http://localhost:3000/api/crypto/oauth/callback
-4. Copy your `client_id` and `client_secret`
-5. Note: The redirect URL must match exactly what you set in your `.env` file
+### 1. Clone the repo
 
-### 3. Environment Setup
+```bash
+git clone https://github.com/YOUR_USERNAME/superior.git
+cd superior
+```
 
-1. Clone this repository:
-   ```bash
-   git clone <repository-url>
-   cd personal-finance-dashboard
-   ```
+### 2. Bootstrap Terraform remote state
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+Create the S3 bucket and DynamoDB lock table once:
 
-3. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+aws s3api create-bucket --bucket YOUR-TF-STATE-BUCKET --region us-east-1
+aws s3api put-bucket-versioning \
+  --bucket YOUR-TF-STATE-BUCKET \
+  --versioning-configuration Status=Enabled
+aws dynamodb create-table \
+  --table-name terraform-state-lock \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST --region us-east-1
+```
 
-4. Update `.env` with your credentials:
-   ```env
-   # Plaid API credentials
-   PLAID_CLIENT_ID="your_client_id"
-   PLAID_SECRET="your_secret"
-   PLAID_ENV="development"  # or "sandbox" or "production"
+Update `terraform/backend.tf` with your bucket name, then:
 
-   # Coinbase API credentials
-   COINBASE_CLIENT_ID="your_coinbase_client_id"
-   COINBASE_CLIENT_SECRET="your_coinbase_client_secret"
-   COINBASE_REDIRECT_URI="http://localhost:3000/api/crypto/oauth/callback"
+```bash
+cd terraform
+terraform init
+terraform workspace new prod   # or dev / staging
+```
 
-   # Database
-   DATABASE_URL="file:./dev.db"
+### 3. Store API credentials in AWS Secrets Manager
 
-   # Next Auth (generate a secret with: openssl rand -base64 32)
-   NEXTAUTH_SECRET="your_generated_secret"
-   NEXTAUTH_URL="http://localhost:3000"
-   ```
+```bash
+# Plaid (required)
+aws secretsmanager create-secret \
+  --name "superior/plaid" \
+  --secret-string '{"client_id":"YOUR_PLAID_CLIENT_ID","secret":"YOUR_PLAID_SECRET"}'
 
-### 4. Database Setup
+# Coinbase (optional — skip if you don't need crypto tracking)
+aws secretsmanager create-secret \
+  --name "superior/coinbase" \
+  --secret-string '{"client_id":"YOUR_COINBASE_CLIENT_ID","client_secret":"YOUR_COINBASE_CLIENT_SECRET"}'
+```
 
-1. Initialize the database:
-   ```bash
-   npx prisma db push
-   ```
+### 4. Deploy stateful infrastructure with Terraform
 
-### 5. Running the Application
+```bash
+cd terraform
+terraform apply
+```
 
-1. Start the development server:
-   ```bash
-   npm run dev
-   ```
+This provisions DynamoDB tables, the Cognito User Pool, and writes all resource IDs to SSM Parameter Store for CDK to consume.
 
-2. Open [http://localhost:3000](http://localhost:3000) in your browser
+### 5. Deploy the application layer with CDK
 
-### 6. Connecting Accounts
+```bash
+cd cdk
+npm install
+cdk bootstrap          # once per account/region
+cdk deploy --context stage=prod
+```
 
-1. For Bank Accounts:
-   - Click the "Connect Bank Account" button in the dashboard
-   - Follow the Plaid Link flow to connect your bank accounts
-   - Your accounts should appear in the dashboard immediately
+CDK reads the SSM parameters Terraform wrote, bundles the Python Lambda via Docker, and deploys API Gateway + Lambda + EventBridge. At the end it prints:
 
-2. For Coinbase:
-   - Click the "Connect Coinbase" button in the dashboard
-   - You'll be redirected to Coinbase to authorize the application
-   - After authorization, your Coinbase accounts and balances will appear in the dashboard
-   - Balances are automatically refreshed periodically
+```
+Outputs:
+superior-prod.ApiUrl = https://abc123.execute-api.us-east-1.amazonaws.com/prod
+```
 
-3. Refresh the page to see updated balances for all accounts
+### 6. Deploy the frontend with AWS Amplify
 
-## Daily Balance Updates (Optional)
+1. Fork this repo and push to your GitHub account.
+2. Go to the [AWS Amplify Console](https://console.aws.amazon.com/amplify/) → **New app → Host web app**.
+3. Connect your GitHub fork and select the `main` branch.
+4. Set the app root to `frontend/`.
+5. Add these **environment variables** in the Amplify console:
 
-If you want to receive daily balance updates via email, follow these additional steps:
+| Variable | Value |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | CDK output `ApiUrl` |
+| `NEXT_PUBLIC_COGNITO_USER_POOL_ID` | Terraform output `user_pool_id` |
+| `NEXT_PUBLIC_COGNITO_CLIENT_ID` | Terraform output `user_pool_client_id` |
 
-### 1. Email Setup (Amazon SES)
+6. Click **Save and deploy**.
 
-Add the following to your `.env` file to enable email notifications:
-   ```env
-   EMAIL_HOST=email-smtp.us-east-1.amazonaws.com
-   EMAIL_PORT=587
-   EMAIL_USER=your_ses_smtp_username
-   EMAIL_PASSWORD=your_ses_smtp_password
-   EMAIL_FROM=your_verified_email@domain.com
-   ```
+### 7. Verify
 
-### 2. Setting Up the Daily Update Script
+```bash
+curl https://YOUR_API_URL/health
+# → {"status":"ok"}
+```
 
-1. Make the refresh script executable:
-   ```bash
-   chmod +x scripts/refresh-data.sh
-   ```
+---
 
-2. Create a logs directory:
-   ```bash
-   mkdir logs
-   ```
+## CI/CD (GitHub Actions)
 
-3. Test the script:
-   ```bash
-   ./scripts/refresh-data.sh
-   ```
+Three workflows are included:
 
-### 3. Setting Up the Cron Job
+| Workflow | Trigger | What it does |
+|---|---|---|
+| [`test.yml`](.github/workflows/test.yml) | Every PR + push to `main` | Backend pytest (40 tests) + frontend lint + TypeScript type-check |
+| [`deploy-infra.yml`](.github/workflows/deploy-infra.yml) | Push to `main` (terraform/ changes) or manual | Terraform plan + apply |
+| [`deploy-app.yml`](.github/workflows/deploy-app.yml) | Push to `main` (backend/ or cdk/ changes) or manual | Tests → CDK deploy |
 
-1. Open your crontab:
-   ```bash
-   crontab -e
-   ```
+### Setting up the deploy workflows
 
-2. Add the following line to run the script daily at 6 AM:
-   ```bash
-   0 6 * * * /full/path/to/scripts/refresh-data.sh >> /full/path/to/logs/refresh.log 2>&1
-   ```
-   Replace `/full/path/to` with your actual project path.
+Both deploy workflows authenticate via [OIDC](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services) — no long-lived AWS keys stored in GitHub.
 
-3. Save and exit the editor
+**Step 1.** Create an IAM OIDC identity provider for GitHub Actions:
 
-4. Verify your cron job:
-   ```bash
-   crontab -l
-   ```
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
 
-### Troubleshooting
+**Step 2.** Create an IAM role with the following trust policy (replace placeholders):
 
-1. Check the logs for any errors:
-   ```bash
-   tail -f logs/refresh.log
-   ```
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::YOUR_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+      },
+      "StringLike": {
+        "token.actions.githubusercontent.com:sub": "repo:YOUR_GITHUB_USERNAME/superior:*"
+      }
+    }
+  }]
+}
+```
 
-2. Common issues:
-   - `ITEM_LOGIN_REQUIRED`: You need to re-authenticate with your bank
-   - `INVALID_CREDENTIALS`: Your bank credentials need updating
-   - `INSTITUTION_DOWN`: The bank's systems are temporarily unavailable
+Attach these managed policies: `AWSCloudFormationFullAccess`, `AWSLambdaFullAccess`, `IAMFullAccess`, `AmazonDynamoDBFullAccess`, `AmazonAPIGatewayAdministrator`, `AmazonCognitoPowerUser`, `SecretsManagerReadWrite`, `AmazonSSMReadOnlyAccess`.
 
-## Development
+**Step 3.** Add the role ARN as a GitHub Actions secret named `AWS_DEPLOY_ROLE_ARN`.
 
-### Project Structure
+---
 
-- `/src` - Application source code
-  - `/app` - Next.js app router components
-  - `/components` - Reusable React components
-  - `/lib` - Utility functions and configurations
-- `/scripts` - Automation scripts
-- `/prisma` - Database schema and migrations
+## Local Development
 
-### Database Management with Prisma Studio
+### Backend
 
-Prisma Studio provides a modern interface to view and edit your database data:
+```bash
+cd backend
+poetry install
+poetry run pytest              # run all 40 tests
+poetry run pytest -v -k plaid  # run a specific module
+```
 
-1. Start Prisma Studio:
-   ```bash
-   npx prisma studio
-   ```
+Tests use [moto](https://github.com/getmoto/moto) to mock DynamoDB and Secrets Manager — no AWS credentials or internet connection needed.
 
-2. Open [http://localhost:5555](http://localhost:5555) in your browser
+### Frontend
 
-3. You can:
-   - View all your connected bank accounts
-   - See historical balance records
-   - Manage Plaid connections
-   - Export data as CSV
-   - Filter and sort records
+```bash
+cd frontend
+npm install
+npm run dev    # http://localhost:3000
+npm test       # Jest unit tests
+npm run lint   # ESLint + type-check
+```
 
-Note: Be cautious when manually editing data as it might affect the application's functionality.
+Create `frontend/.env.local` with:
 
-### Available Scripts
+```bash
+NEXT_PUBLIC_API_URL=https://YOUR_API_URL
+NEXT_PUBLIC_COGNITO_USER_POOL_ID=us-east-1_XXXXXXXXX
+NEXT_PUBLIC_COGNITO_CLIENT_ID=XXXXXXXXXXXXXXXXXXXXXXXXXX
+```
 
-- `npm run dev` - Start development server
-- `npm run build` - Build for production
-- `npm start` - Start production server
-- `./scripts/refresh-data.sh` - Manually run balance update
+---
 
-## Contributing
+## Project Structure
 
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
+```
+.
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI app + Mangum Lambda handler
+│   │   ├── config.py            # Settings (pydantic-settings)
+│   │   ├── dependencies.py      # Auth + AWS client injection
+│   │   ├── models/              # Pydantic request/response models
+│   │   ├── routers/             # FastAPI route handlers
+│   │   │   ├── accounts.py
+│   │   │   ├── plaid.py
+│   │   │   ├── crypto.py
+│   │   │   └── health.py
+│   │   └── services/            # Business logic
+│   │       ├── dynamodb.py
+│   │       ├── plaid.py
+│   │       ├── coinbase.py
+│   │       └── secrets.py
+│   ├── sync/
+│   │   └── handler.py           # EventBridge daily sync Lambda
+│   ├── tests/                   # pytest suite (40 tests, moto mocks)
+│   └── pyproject.toml           # Poetry dependencies
+├── cdk/                         # AWS CDK (TypeScript) — application layer
+│   ├── bin/app.ts               # CDK app entry point
+│   └── lib/
+│       ├── config.ts            # Stage configuration
+│       ├── constructs/
+│       │   └── python-function.ts  # Reusable Poetry-bundled Lambda construct
+│       └── stacks/
+│           └── superior-stack.ts   # Lambda + API GW + EventBridge
+├── terraform/                   # Terraform — stateful infrastructure
+│   ├── backend.tf               # S3 remote state + DynamoDB lock
+│   ├── main.tf                  # Module composition
+│   ├── locals.tf                # Workspace-based stage resolution
+│   └── modules/
+│       ├── dynamodb/            # 5 DynamoDB tables (prevent_destroy=true)
+│       ├── cognito/             # Cognito User Pool + Client
+│       └── ssm_outputs/         # SSM params consumed by CDK
+├── frontend/
+│   └── src/
+│       ├── app/                 # Next.js App Router pages
+│       ├── components/          # React components
+│       ├── lib/                 # API client, Amplify config, account types
+│       └── __tests__/           # Jest unit tests
+└── .github/workflows/
+    ├── test.yml                 # CI: tests on every PR
+    ├── deploy-infra.yml         # CD: Terraform apply on terraform/ changes
+    └── deploy-app.yml           # CD: CDK deploy on backend/ or cdk/ changes
+```
+
+---
+
+## Cost Estimate
+
+For a single user at low usage, this runs near-free:
+
+| Service | Estimated monthly cost |
+|---|---|
+| Lambda + API Gateway | Free tier |
+| DynamoDB | Free tier (< 25 GB, < 200M requests) |
+| Cognito | Free tier (up to 50,000 MAUs) |
+| Secrets Manager | ~$0.80 (2 secrets × $0.40) |
+| Amplify Hosting | Free tier |
+
+**Total: ~$0.80/month** after free tier.
+
+---
 
 ## License
 
-[MIT](LICENSE)
+MIT
