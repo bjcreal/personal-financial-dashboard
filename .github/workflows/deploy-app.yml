@@ -1,11 +1,6 @@
 name: Deploy Application (CDK)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "backend/**"
-      - "cdk/**"
   workflow_dispatch:
     inputs:
       stage:
